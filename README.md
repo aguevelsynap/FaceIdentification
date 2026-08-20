@@ -1,6 +1,6 @@
-# SL2619 CPU Face ID
+# SL2619 Face ID
 
-Board-native CPU face identification prototype using the TFLite C API already present on the SL2619 image.
+face identification prototype using the TFLite C API already present on the SL2619 image.
 
 ## Runtime
 
