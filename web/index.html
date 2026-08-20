@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SL2619 Face ID</title>
+<style>
+body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:20px} .wrap{max-width:1100px;margin:auto}
+.grid{display:grid;grid-template-columns:2fr 1fr;gap:18px}.card{background:#1c1c1c;border-radius:12px;padding:16px;box-shadow:0 2px 10px #0006}
+img{width:100%;border-radius:8px;background:#000}.muted{color:#aaa}.ok{color:#5fdb7b}.warn{color:#ffb45c}
+input,button{padding:10px;border-radius:8px;border:1px solid #444;background:#111;color:#eee}button{cursor:pointer;background:#2563eb;border:0}
+.face{padding:10px;border:1px solid #333;border-radius:8px;margin:8px 0}.unknown{border-color:#c77b22}.known{border-color:#2d8b57}
+</style>
+</head>
+<body><div class="wrap">
+<h1>SL2619 CPU Face ID</h1>
+<div class="grid">
+<div class="card"><img src="/stream.mjpg" alt="Live annotated video"></div>
+<div class="card">
+<h2>Status</h2><div id="status" class="muted">Connecting...</div>
+<h2>Enroll current unknown</h2>
+<form method="post" action="/enroll">
+<label>Name<br><input name="name" required maxlength="64" placeholder="Alice"></label><br><br>
+<label>Face<br><select id="face_index" name="face_index" style="padding:10px;border-radius:8px;background:#111;color:#eee;border:1px solid #444;width:100%"><option value="0">Waiting for face...</option></select></label><br><br>
+<button type="submit">Enroll visible unknown</button>
+</form>
+<p class="muted">Enrollment uses the latest 128-D SFace embedding for the selected face currently visible to the detector.</p>
+<div id="faces"></div>
+</div></div></div>
+<script>
+async function refresh(){
+ try{const r=await fetch('/status',{cache:'no-store'});const s=await r.json();
+ document.getElementById('status').innerHTML=`<div><b>Capture:</b> ${s.capture_fps} fps</div><div><b>Processed:</b> ${s.fps.toFixed(1)} fps</div><div><b>Inference:</b> ${s.inference_ms.toFixed(0)} ms</div><div><b>Frames:</b> ${s.frames}</div>`;
+ const f=document.getElementById('faces'); f.innerHTML='';
+ const sel=document.getElementById('face_index'); sel.innerHTML='';
+ const unknown=s.faces.filter(x=>x.identity==='Unknown');
+ s.faces.forEach(x=>{const d=document.createElement('div');d.className='face '+(x.identity==='Unknown'?'unknown':'known');d.innerHTML=`<b>Face ${x.index}</b> — ${x.identity} — detector ${x.detector.toFixed(3)} — similarity ${x.similarity>=0?x.similarity.toFixed(3):'n/a'}`;f.appendChild(d);});
+ if(unknown.length===0){const o=document.createElement('option');o.value='0';o.textContent='No unknown face detected';sel.appendChild(o);}
+ else {unknown.forEach(x=>{const o=document.createElement('option');o.value=x.index;o.textContent=`Face ${x.index} — Unknown (detector ${x.detector.toFixed(3)})`;sel.appendChild(o);});}
+ }catch(e){document.getElementById('status').textContent='Connection lost';}
+}
+setInterval(refresh,1000);refresh();
+</script>
+</body></html>

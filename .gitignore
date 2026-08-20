@@ -1,0 +1,6 @@
+models/
+face_db.json
+*.pyc
+__pycache__/
+*:Zone.Identifier
+*:sec.endpointdlp
