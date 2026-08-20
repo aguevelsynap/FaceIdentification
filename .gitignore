@@ -1,4 +1,3 @@
-models/
 face_db.json
 *.pyc
 __pycache__/
