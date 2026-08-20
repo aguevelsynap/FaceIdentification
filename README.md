@@ -11,8 +11,6 @@ face identification prototype using the TFLite C API already present on the SL26
 - GStreamer for H.264/RTP output
 - Python standard-library HTTP server for the web UI
 
-No ONNX Runtime is required on the board.
-
 ## Models
 
 Copy the validated models into `models/`:
