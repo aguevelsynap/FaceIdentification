@@ -4,6 +4,8 @@ import base64
 import ctypes
 import json
 import os
+import re
+import socket
 import subprocess
 import threading
 import time
@@ -37,6 +39,19 @@ class SharedState:
         self.frame_count = 0
         self.last_inference_ms = 0.0
         self.last_error = ""
+        self.current_app = "none"
+        self.pending_app = None
+        self.debounce_remaining = 0.0
+        self.tv_connected = False
+        self.tv_host = ""
+        self.tv_mac = ""
+        self.last_wol_time = 0.0
+        self.target_user = "Aguevel"
+        self.target_recognized = False
+        self.matched_target = None
+        self.kids_user = "kids,Mike"
+        self.kids_recognized = False
+        self.matched_kid = None
         self.running = True
 
     def set_frame(self, frame, jpeg):
@@ -317,34 +332,66 @@ class WebHandler(BaseHTTPRequestHandler):
     state = None
     db_path = None
     threshold = 0.363
+    tv = None
 
     def _send(self, status, content_type, body):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
         if self.path == '/':
-            body = Path(Path(__file__).resolve().parent.parent / 'web' / 'index.html').read_bytes()
+            candidates = [
+                Path(__file__).resolve().parent.parent / 'web' / 'index.html',
+                Path(__file__).resolve().parent / 'web' / 'index.html',
+                Path(__file__).resolve().parent / 'index.html',
+                Path.cwd() / 'web' / 'index.html',
+                Path.cwd() / 'index.html',
+            ]
+            html_path = next((p for p in candidates if p.is_file()), None)
+            if html_path:
+                body = html_path.read_bytes()
+            else:
+                body = b'<!doctype html><html><body><h1>Error: index.html not found</h1><p>Looked in candidate paths.</p></body></html>'
             self._send(HTTPStatus.OK, 'text/html; charset=utf-8', body)
             return
         if self.path == '/status':
             _, rows, fps, capfps, count, infer_ms, error = self.state.snapshot()
-            payload = {
-                'running': self.state.running,
-                'fps': fps,
-                'capture_fps': capfps,
-                'frames': count,
-                'inference_ms': infer_ms,
-                'faces': [
-                    {'index': r['face_index'], 'identity': r['identity'], 'similarity': r['similarity'], 'detector': r['detector_score']}
-                    for r in rows
-                ],
-                'error': error,
-            }
+            with self.state.lock:
+                payload = {
+                    'running': self.state.running,
+                    'fps': fps,
+                    'capture_fps': capfps,
+                    'frames': count,
+                    'inference_ms': infer_ms,
+                    'current_app': getattr(self.state, 'current_app', 'none'),
+                    'tv': {
+                        'connected': getattr(self.state, 'tv_connected', False),
+                        'host': getattr(self.state, 'tv_host', ''),
+                        'mac': getattr(self.state, 'tv_mac', ''),
+                        'last_wol_ago': round(time.monotonic() - self.state.last_wol_time, 1) if getattr(self.state, 'last_wol_time', 0.0) > 0 else None,
+                        'current_app': getattr(self.state, 'current_app', 'none'),
+                        'pending_app': getattr(self.state, 'pending_app', None),
+                        'debounce_remaining': getattr(self.state, 'debounce_remaining', 0.0),
+                        'target_user': getattr(self.state, 'target_user', 'Aguevel'),
+                        'target_recognized': getattr(self.state, 'target_recognized', False),
+                        'matched_target': getattr(self.state, 'matched_target', None),
+                        'kids_user': getattr(self.state, 'kids_user', 'kids,Mike'),
+                        'kids_recognized': getattr(self.state, 'kids_recognized', False),
+                        'matched_kid': getattr(self.state, 'matched_kid', None),
+                    },
+                    'enrolled_users': sorted(list(load_db(self.db_path).keys())),
+                    'faces': [
+                        {'index': r['face_index'], 'identity': r['identity'], 'similarity': r['similarity'], 'detector': r['detector_score']}
+                        for r in rows
+                    ],
+                    'error': error,
+                }
             self._send(HTTPStatus.OK, 'application/json', json.dumps(payload).encode())
             return
         if self.path == '/snapshot.jpg':
@@ -377,6 +424,26 @@ class WebHandler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.NOT_FOUND, 'text/plain; charset=utf-8', b'Not found')
 
     def do_POST(self):
+        if self.path in ('/tv/wake', '/wake_tv'):
+            if self.tv:
+                success = self.tv.wake()
+                self._send(HTTPStatus.OK, 'application/json', json.dumps({
+                    'ok': True,
+                    'message': 'Wake-on-LAN packet sent and wake sequence executed',
+                    'mac': self.tv.mac,
+                    'connected': self.tv.connected
+                }).encode())
+            else:
+                self._send(HTTPStatus.OK, 'application/json', json.dumps({
+                    'ok': False,
+                    'message': 'Android TV integration is not enabled'
+                }).encode())
+            return
+        if self.path in ('/flush', '/flush_db', '/clear_users'):
+            save_db(self.db_path, {})
+            print(f"[Web] Flushed all enrolled users from database: {self.db_path}", flush=True)
+            self._send(HTTPStatus.OK, 'application/json', json.dumps({'ok': True, 'message': 'All enrolled users flushed'}).encode())
+            return
         if self.path != '/enroll':
             self._send(HTTPStatus.NOT_FOUND, 'text/plain; charset=utf-8', b'Not found')
             return
@@ -422,24 +489,25 @@ class WebHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_web_server(state, db_path, host, port, threshold):
+def start_web_server(state, db_path, host, port, threshold, tv=None):
     WebHandler.state = state
     WebHandler.db_path = db_path
     WebHandler.threshold = threshold
+    WebHandler.tv = tv
     server = ThreadingHTTPServer((host, port), WebHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
 
 
-def run_camera(args, yunet, sface):
+def run_camera(args, yunet, sface, tv=None):
     global _SFACE_MODEL
     _SFACE_MODEL = sface
     db = load_db(args.db)
     state = SharedState(args.db)
     server = None
     if args.web_port > 0:
-        server = start_web_server(state, args.db, args.web_host, args.web_port, args.threshold)
+        server = start_web_server(state, args.db, args.web_host, args.web_port, args.threshold, tv=tv)
         print(f'Web UI: http://{args.web_host}:{args.web_port}/', flush=True)
 
     cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
@@ -464,6 +532,14 @@ def run_camera(args, yunet, sface):
     report_frames = 0
     last_infer_time = time.monotonic()
 
+    # State tracking for Android TV app switching and debounce
+    current_app = None
+    pending_app = None
+    pending_app_since = None
+    debounce_seconds = max(0.1, float(args.debounce))
+    target_user = args.target_user
+    kids_user = getattr(args, 'kids_user', 'kids')
+
     try:
         while True:
             ok, frame = cap.read()
@@ -480,6 +556,16 @@ def run_camera(args, yunet, sface):
                 annotated, last_rows = annotate(frame, detections, args.threshold, db)
                 state.last_inference_ms = (time.monotonic() - infer_start) * 1000.0
                 last_infer_time = now
+
+                # Detailed logging for detected faces and similarity scores
+                if last_rows:
+                    face_logs = [
+                        f"Face {r['face_index']}: identity='{r['identity']}', similarity={r['similarity']:.3f}, detector_score={r['detector_score']:.3f}"
+                        for r in last_rows
+                    ]
+                    print(f"[Face ID] Frame {frame_count}: Detected {len(last_rows)} face(s) -> " + "; ".join(face_logs), flush=True)
+                else:
+                    print(f"[Face ID] Frame {frame_count}: No faces detected", flush=True)
             else:
                 annotated = frame.copy()
                 for row in last_rows:
@@ -490,8 +576,94 @@ def run_camera(args, yunet, sface):
                     cv2.putText(annotated, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
                     for x, y in row['landmarks']:
                         cv2.circle(annotated, (int(x), int(y)), 3, (255, 0, 255), -1)
+
+            # Android TV app decision and debouncing logic
+            raw_kids = getattr(args, 'kids_user', 'kids,Mike')
+            kids_list = [k.strip().lower() for k in raw_kids.split(',') if k.strip()]
+            if 'kids' not in kids_list:
+                kids_list.append('kids')
+            if 'kid' not in kids_list:
+                kids_list.append('kid')
+
+            target_list = [t.strip().lower() for t in target_user.split(',') if t.strip()]
+
+            # Find matching identities from detected faces
+            matched_kid = next((r['identity'] for r in last_rows if str(r.get('identity', '')).strip().lower() in kids_list), None)
+            is_kids_recognized = matched_kid is not None
+
+            matched_target = next((r['identity'] for r in last_rows if str(r.get('identity', '')).strip().lower() in target_list), None)
+            is_target_recognized = matched_target is not None
+
+            if is_kids_recognized:
+                desired_app = "youtube_kids"
+                reason = f"kids user '{matched_kid}' recognized"
+            elif is_target_recognized:
+                desired_app = "netflix"
+                reason = f"target user '{matched_target}' recognized"
+            else:
+                desired_app = "youtube"
+                reason = f"default (neither target nor kids recognized)"
+
+            if tv is not None:
+                if desired_app != current_app:
+                    if pending_app != desired_app:
+                        pending_app = desired_app
+                        pending_app_since = now
+                        print(
+                            f"[App Switch] Candidate switch to '{desired_app}' ({reason}). "
+                            f"Starting {debounce_seconds:.1f}s debounce timer...",
+                            flush=True
+                        )
+                    else:
+                        elapsed = now - pending_app_since
+                        if elapsed >= debounce_seconds:
+                            print(
+                                f"[App Switch] Debounce threshold ({debounce_seconds:.1f}s) met. "
+                                f"Switching app: '{current_app}' -> '{pending_app}'",
+                                flush=True
+                            )
+                            if pending_app == "netflix":
+                                tv.launch_netflix()
+                            elif pending_app == "youtube_kids":
+                                tv.launch_youtube_kids()
+                            elif pending_app == "youtube":
+                                tv.launch_youtube()
+                            current_app = pending_app
+                            state.current_app = current_app
+                            pending_app = None
+                            pending_app_since = None
+                else:
+                    if pending_app is not None:
+                        print(
+                            f"[App Switch] Reverted to current app '{current_app}'. Cancelling pending switch to '{pending_app}'.",
+                            flush=True
+                        )
+                        pending_app = None
+                        pending_app_since = None
+
+            app_display = f'app={current_app or "none"}'
+            debounce_rem = max(0.0, debounce_seconds - (now - pending_app_since)) if (pending_app is not None and pending_app_since is not None) else 0.0
+            if pending_app is not None and pending_app_since is not None:
+                app_display += f' -> {pending_app} ({debounce_rem:.1f}s)'
+
+            with state.lock:
+                state.current_app = current_app or "none"
+                state.pending_app = pending_app
+                state.debounce_remaining = round(debounce_rem, 1)
+                state.tv_connected = getattr(tv, 'connected', False) if tv else False
+                state.tv_host = tv.host if tv else "Disabled"
+                state.tv_mac = getattr(tv, 'mac', '') if tv else ""
+                state.last_wol_time = getattr(tv, 'last_wol_time', 0.0) if tv else 0.0
+                state.target_user = target_user
+                state.target_recognized = is_target_recognized
+                state.matched_target = matched_target
+                state.kids_user = raw_kids
+                state.kids_recognized = is_kids_recognized
+                state.matched_kid = matched_kid
+
             cv2.putText(annotated, f'face-id cpu  faces={len(last_rows)}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(annotated, f'infer={state.last_inference_ms:.0f}ms', (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(annotated, app_display, (10, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
             ok_jpg, jpg = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if ok_jpg:
@@ -507,7 +679,7 @@ def run_camera(args, yunet, sface):
                 fps = report_frames / max(elapsed, 1e-6)
                 state.fps = fps
                 state.capture_fps = actual_fps
-                print(f'frames={frame_count} processed_fps={fps:.1f} faces={len(last_rows)} infer_ms={state.last_inference_ms:.1f}', flush=True)
+                print(f'frames={frame_count} processed_fps={fps:.1f} faces={len(last_rows)} infer_ms={state.last_inference_ms:.1f} app={current_app}', flush=True)
                 report_start = time.monotonic()
                 report_frames = 0
     except (BrokenPipeError, OSError) as exc:
@@ -527,9 +699,282 @@ def run_camera(args, yunet, sface):
                 writer.kill()
             except Exception:
                 pass
+        if tv:
+            try:
+                tv.disconnect()
+            except Exception:
+                pass
         if server:
             server.shutdown()
     return 0
+
+
+def send_wake_on_lan(mac_address: str, target_ip: str = "255.255.255.255", port: int = 9) -> bool:
+    """Send a Wake-on-LAN magic packet (102 bytes) to the specified MAC address."""
+    clean_mac = re.sub(r'[^0-9A-Fa-f]', '', mac_address or '')
+    if len(clean_mac) != 12:
+        print(f"[WoL] Invalid MAC address format: '{mac_address}'", flush=True)
+        return False
+    mac_bytes = bytes.fromhex(clean_mac)
+    packet = b'\xff' * 6 + mac_bytes * 16
+
+    destinations = [("255.255.255.255", port)]
+    if port != 7:
+        destinations.append(("255.255.255.255", 7))
+
+    clean_ip = (target_ip or "").split(':')[0].strip()
+    if clean_ip and clean_ip != "255.255.255.255":
+        parts = clean_ip.split('.')
+        if len(parts) == 4:
+            subnet_bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+            destinations.append((subnet_bcast, port))
+        destinations.append((clean_ip, port))
+
+    success = False
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for dest_ip, dest_port in destinations:
+            try:
+                sock.sendto(packet, (dest_ip, dest_port))
+                success = True
+            except Exception as exc:
+                print(f"[WoL] Failed sending to {dest_ip}:{dest_port} ({exc})", flush=True)
+
+    formatted_mac = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
+    if success:
+        print(f"[WoL] Sent magic packet for {formatted_mac} to {destinations}", flush=True)
+    return success
+
+
+def resolve_mac_address(ip: str) -> str:
+    """Attempt to resolve MAC address for a given IP from ARP table or ip neigh."""
+    clean_ip = (ip or "").split(':')[0].strip()
+    # 1. Read /proc/net/arp (standard on Linux/SL2619)
+    try:
+        if os.path.exists('/proc/net/arp'):
+            with open('/proc/net/arp', 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[0] == clean_ip:
+                        mac = parts[3].lower()
+                        if mac != "00:00:00:00:00:00" and len(mac) == 17:
+                            return mac
+    except Exception:
+        pass
+    # 2. Try ip neigh show <ip>
+    try:
+        res = subprocess.run(['ip', 'neigh', 'show', clean_ip], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0 and res.stdout:
+            match = re.search(r'lladdr\s+([0-9a-fA-F:]{17})', res.stdout)
+            if match:
+                return match.group(1).lower()
+    except Exception:
+        pass
+    # 3. Known default for user's network if 192.168.1.173
+    if clean_ip == '192.168.1.173':
+        return '70:54:b4:fe:8e:ca'
+    return ""
+
+
+class AndroidTV:
+    def __init__(self, host: str, mac: str = None, port: int = 5038):
+        self.host = host
+        self.mac = mac.strip().lower() if mac else ""
+        self.port = port
+        self.connected = False
+        self.last_wol_time = 0.0
+        if not self.mac:
+            self.mac = resolve_mac_address(self.host)
+            if self.mac:
+                print(f"[AndroidTV] Auto-resolved MAC for {self.host}: {self.mac}", flush=True)
+
+    def _run(self, *args):
+        """Run an adb command using isolated ADB server port and return its output."""
+        cmd = ["adb", "-P", str(self.port), *args]
+        print(f"[ADB] Executing: {' '.join(cmd)}", flush=True)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+            if stdout:
+                print(f"[ADB] stdout: {stdout}", flush=True)
+            if stderr:
+                print(f"[ADB] stderr: {stderr}", flush=True)
+            return result
+        except subprocess.TimeoutExpired:
+            print(f"[ADB] Command timed out (10s): {' '.join(cmd)}", flush=True)
+            return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="TimeoutExpired")
+        except Exception as exc:
+            print(f"[ADB] Command exception ({exc}): {' '.join(cmd)}", flush=True)
+            return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=str(exc))
+
+    def wake_on_lan(self) -> bool:
+        """Send Wake-on-LAN magic packet to TV."""
+        if not self.mac:
+            self.mac = resolve_mac_address(self.host)
+        if not self.mac:
+            print(f"[AndroidTV] Cannot send WoL: MAC address is unknown for {self.host}", flush=True)
+            return False
+        ip_only = self.host.split(":")[0]
+        ok = send_wake_on_lan(self.mac, target_ip=ip_only)
+        if ok:
+            self.last_wol_time = time.monotonic()
+        return ok
+
+    def wake_screen(self):
+        """Wake the TV screen if sleeping using ADB keyevent 224 (KEYCODE_WAKEUP)."""
+        print("[AndroidTV] Sending KEYCODE_WAKEUP (224) to ensure display is ON...", flush=True)
+        res = self._run("-s", self.host, "shell", "input", "keyevent", "224")
+        return res.returncode == 0
+
+    def wake(self) -> bool:
+        """Full wake sequence: send WoL, try connecting ADB, and wake screen."""
+        print(f"[AndroidTV] Initiating wake sequence for {self.host}...", flush=True)
+        wol_sent = self.wake_on_lan()
+        if not self.connected:
+            print("[AndroidTV] Waiting 2s for TV network stack to awaken after WoL...", flush=True)
+            time.sleep(2.0)
+            self.connect(retry_with_wol=False)
+        if self.connected:
+            self.wake_screen()
+        return wol_sent
+
+    def connect(self, retry_with_wol: bool = True) -> bool:
+        """Connect to the Android TV, attempting WoL if initial attempt fails."""
+        print(f"[AndroidTV] Ensuring ADB server is started on port {self.port}...", flush=True)
+        self._run("start-server")
+        print(f"[AndroidTV] Connecting to {self.host}...", flush=True)
+        result = self._run("connect", self.host)
+
+        if result.returncode != 0 and retry_with_wol:
+            print(f"[AndroidTV] ADB connection failed: {result.stderr.strip()}. Attempting Wake-on-LAN...", flush=True)
+            self.wake_on_lan()
+            time.sleep(2.5)
+            result = self._run("connect", self.host)
+
+        # Verify the device is listed
+        devices = self._run("devices").stdout
+        if self.host.split(":")[0] in devices:
+            print(f"[AndroidTV] Connected successfully to {self.host}.", flush=True)
+            self.connected = True
+            self.wake_screen()
+            if not self.mac:
+                self._query_device_mac()
+            return True
+
+        if retry_with_wol and not self.connected:
+            print(f"[AndroidTV] Device {self.host} not responding to ADB. Sending WoL and retrying...", flush=True)
+            self.wake_on_lan()
+            time.sleep(3.0)
+            self._run("connect", self.host)
+            devices = self._run("devices").stdout
+            if self.host.split(":")[0] in devices:
+                print(f"[AndroidTV] Connected successfully to {self.host} after WoL.", flush=True)
+                self.connected = True
+                self.wake_screen()
+                if not self.mac:
+                    self._query_device_mac()
+                return True
+
+        print(f"[AndroidTV] Device {self.host} not found in adb devices list.", flush=True)
+        self.connected = False
+        return False
+
+    def _query_device_mac(self):
+        """Query connected Android TV for its MAC address if unknown."""
+        for iface in ('wlan0', 'eth0'):
+            res = self._run("-s", self.host, "shell", "cat", f"/sys/class/net/{iface}/address")
+            mac_val = res.stdout.strip().lower()
+            if len(mac_val) == 17 and mac_val != "00:00:00:00:00:00":
+                self.mac = mac_val
+                print(f"[AndroidTV] Auto-detected TV MAC from {iface}: {self.mac}", flush=True)
+                return
+        res = self._run("-s", self.host, "shell", "getprop", "ro.boot.wifimacaddr")
+        mac_val = res.stdout.strip().lower()
+        if len(mac_val) == 17:
+            self.mac = mac_val
+            print(f"[AndroidTV] Auto-detected TV MAC from getprop: {self.mac}", flush=True)
+
+    def ensure_connected(self) -> bool:
+        """Ensure device is connected and awake before sending app commands."""
+        if not self.connected:
+            return self.connect(retry_with_wol=True)
+        self.wake_screen()
+        return True
+
+    def launch_netflix(self):
+        """Launch Netflix."""
+        self.ensure_connected()
+        print("[AndroidTV] Launching Netflix (com.netflix.ninja)...", flush=True)
+        result = self._run(
+            "-s", self.host,
+            "shell",
+            "monkey",
+            "-p", "com.netflix.ninja",
+            "-c", "android.intent.category.LAUNCHER",
+            "1"
+        )
+
+        if result.returncode == 0:
+            print("[AndroidTV] Netflix launched successfully.", flush=True)
+        else:
+            print(f"[AndroidTV] Failed to launch Netflix: {result.stderr.strip()}", flush=True)
+
+    def launch_youtube(self):
+        """Launch YouTube."""
+        self.ensure_connected()
+        print("[AndroidTV] Launching YouTube (com.google.android.youtube.tv)...", flush=True)
+        result = self._run(
+            "-s", self.host,
+            "shell",
+            "monkey",
+            "-p", "com.google.android.youtube.tv",
+            "-c", "android.intent.category.LAUNCHER",
+            "1"
+        )
+
+        if result.returncode == 0:
+            print("[AndroidTV] YouTube launched successfully.", flush=True)
+        else:
+            print(f"[AndroidTV] Failed to launch YouTube: {result.stderr.strip()}", flush=True)
+
+    def launch_youtube_kids(self):
+        """Launch YouTube Kids."""
+        self.ensure_connected()
+        print("[AndroidTV] Launching YouTube Kids (com.google.android.youtube.tvkids)...", flush=True)
+        result = self._run(
+            "-s", self.host,
+            "shell",
+            "monkey",
+            "-p", "com.google.android.youtube.tvkids",
+            "-c", "android.intent.category.LAUNCHER",
+            "1"
+        )
+        if result.returncode != 0:
+            result = self._run(
+                "-s", self.host,
+                "shell",
+                "monkey",
+                "-p", "com.google.android.apps.youtube.kids",
+                "-c", "android.intent.category.LAUNCHER",
+                "1"
+            )
+
+        if result.returncode == 0:
+            print("[AndroidTV] YouTube Kids launched successfully.", flush=True)
+        else:
+            print(f"[AndroidTV] Failed to launch YouTube Kids: {result.stderr.strip()}", flush=True)
+
+    def disconnect(self):
+        """Disconnect from Android TV."""
+        print(f"[AndroidTV] Disconnecting from {self.host}...", flush=True)
+        self.connected = False
+        self._run("disconnect", self.host)
 
 
 def run_image(args, yunet, sface):
@@ -580,16 +1025,29 @@ def main():
     ap.add_argument('--rtp-bitrate', type=int, default=2000)
     ap.add_argument('--web-host', default='0.0.0.0')
     ap.add_argument('--web-port', type=int, default=8080)
+    ap.add_argument('--tv-host', default='192.168.100.2:5555', help='Android TV ADB host:port (default: 192.168.100.2:5555)')
+    ap.add_argument('--tv-mac', default='70:54:b4:fe:8e:ca', help='Android TV MAC address for Wake-on-LAN (default: 70:54:b4:fe:8e:ca)')
+    ap.add_argument('--tv-adb-port', type=int, default=5038, help='Local ADB server port on board to avoid conflicts (default: 5038)')
+    ap.add_argument('--target-user', default='Aguevel', help='Target user identity to trigger Netflix (default: Aguevel)')
+    ap.add_argument('--kids-user', default='kids,Mike', help='Comma-separated user identities to trigger YouTube Kids (default: kids,Mike)')
+    ap.add_argument('--debounce', type=float, default=2.5, help='App switch debounce time in seconds (default: 2.5)')
+    ap.add_argument('--no-tv', action='store_true', help='Disable Android TV control')
     args = ap.parse_args()
     if args.enroll and not args.image:
         ap.error('--enroll requires --image')
     if args.infer_every < 1:
         ap.error('--infer-every must be >= 1')
+
+    tv = None
+    if not args.no_tv and args.tv_host:
+        tv = AndroidTV(args.tv_host, mac=args.tv_mac, port=args.tv_adb_port)
+        tv.connect()
+
     yunet = TFLiteModel(args.yunet, args.threads)
     sface = TFLiteModel(args.sface, args.threads)
     if args.image:
         return run_image(args, yunet, sface)
-    return run_camera(args, yunet, sface)
+    return run_camera(args, yunet, sface, tv)
 
 
 _SFACE_MODEL = None

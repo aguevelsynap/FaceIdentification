@@ -3,42 +3,269 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SL2619 Face ID</title>
+<title>SL2619 Face ID & Android TV</title>
 <style>
-body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:20px} .wrap{max-width:1100px;margin:auto}
-.grid{display:grid;grid-template-columns:2fr 1fr;gap:18px}.card{background:#1c1c1c;border-radius:12px;padding:16px;box-shadow:0 2px 10px #0006}
-img{width:100%;border-radius:8px;background:#000}.muted{color:#aaa}.ok{color:#5fdb7b}.warn{color:#ffb45c}
-input,button{padding:10px;border-radius:8px;border:1px solid #444;background:#111;color:#eee}button{cursor:pointer;background:#2563eb;border:0}
-.face{padding:10px;border:1px solid #333;border-radius:8px;margin:8px 0}.unknown{border-color:#c77b22}.known{border-color:#2d8b57}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#0d0f12;color:#eee;margin:0;padding:20px}
+.wrap{max-width:1200px;margin:auto}
+h1{margin-top:0;font-size:1.5rem;font-weight:600;color:#fff;display:flex;align-items:center;gap:10px}
+.grid{display:grid;grid-template-columns:1.5fr 1fr;gap:20px}
+@media (max-width:960px){.grid{grid-template-columns:1fr}}
+.card{background:#16191f;border:1px solid #232833;border-radius:12px;padding:16px;box-shadow:0 4px 14px rgba(0,0,0,0.35);margin-bottom:16px}
+.card h2{margin-top:0;font-size:1.1rem;color:#f3f4f6;border-bottom:1px solid #232833;padding-bottom:8px;margin-bottom:12px}
+img{width:100%;border-radius:8px;background:#000;display:block}
+.muted{color:#8892b0;font-size:0.88rem}
+.ok{color:#4ade80}.warn{color:#facc15}.danger{color:#f87171}
+input,select,button{padding:10px;border-radius:8px;border:1px solid #333d4d;background:#0d0f12;color:#eee;font-size:0.95rem}
+button{cursor:pointer;background:#2563eb;border:0;color:#fff;font-weight:500;transition:background 0.2s}
+button:hover{background:#1d4ed8}
+.face{padding:10px;border:1px solid #2a313d;border-radius:8px;margin:8px 0;background:#101318}.unknown{border-left:4px solid #f59e0b}.known{border-left:4px solid #10b981}
+.badge{display:inline-block;padding:4px 9px;border-radius:6px;font-size:0.82rem;font-weight:700;letter-spacing:0.5px}
+.badge-conn{background:#064e3b;color:#34d399;border:1px solid #059669}
+.badge-disconn{background:#7f1d1d;color:#f87171;border:1px solid #b91c1c}
+.badge-netflix{background:#e50914;color:#fff;box-shadow:0 0 10px rgba(229,9,20,0.4);border:1px solid #b20710}
+.badge-youtube{background:#ff0000;color:#fff;box-shadow:0 0 10px rgba(255,0,0,0.4);border:1px solid #cc0000}
+.badge-ytkids{background:#ff6600;color:#fff;box-shadow:0 0 10px rgba(255,102,0,0.4);border:1px solid #cc5200}
+.badge-none{background:#374151;color:#9ca3af;border:1px solid #4b5563}
+.tv-table{width:100%;border-collapse:collapse;font-size:0.92rem}
+.tv-table td{padding:7px 0;vertical-align:middle}
+.tv-table td:first-child{color:#94a3b8;width:38%}
+.pending-box{margin-top:10px;padding:10px;border-radius:8px;background:#1e1b4b;border:1px solid #4338ca;color:#c7d2fe;font-size:0.88rem;display:flex;align-items:center;gap:8px}
+.stable-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:#064e3b22;border:1px solid #05966944;color:#6ee7b7;font-size:0.85rem}
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:0.88rem}
+.stat-item{background:#0e1117;padding:8px 10px;border-radius:6px;border:1px solid #1f242e}
+.stat-val{font-size:1.1rem;font-weight:600;color:#fff;margin-top:2px}
 </style>
 </head>
-<body><div class="wrap">
-<h1>SL2619 Face ID</h1>
-<div class="grid">
-<div class="card"><img src="/stream.mjpg" alt="Live annotated video"></div>
-<div class="card">
-<h2>Status</h2><div id="status" class="muted">Connecting...</div>
-<h2>Enroll current unknown</h2>
-<form method="post" action="/enroll">
-<label>Name<br><input name="name" required maxlength="64" placeholder="Alice"></label><br><br>
-<label>Face<br><select id="face_index" name="face_index" style="padding:10px;border-radius:8px;background:#111;color:#eee;border:1px solid #444;width:100%"><option value="0">Waiting for face...</option></select></label><br><br>
-<button type="submit">Enroll visible unknown</button>
-</form>
-<p class="muted">Enrollment uses the latest 128-D SFace embedding for the selected face currently visible to the detector.</p>
-<div id="faces"></div>
-</div></div></div>
+<body>
+<div class="wrap">
+  <h1>SL2619 Face ID & Android TV Controller</h1>
+  <div class="grid">
+    <div>
+      <div class="card">
+        <img src="/stream.mjpg" alt="Live annotated video">
+      </div>
+      <div class="card">
+        <h2>Detected Faces</h2>
+        <div id="faces" class="muted">No faces detected</div>
+      </div>
+    </div>
+    <div>
+      <!-- Android TV Status Card -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <h2 style="margin:0">ATV Status</h2>
+          <button id="btn_wake_tv" onclick="wakeTV()" style="background:#2563eb;padding:6px 12px;font-size:0.85rem">⚡ Wake TV (WoL)</button>
+        </div>
+        <table class="tv-table">
+          <tr>
+            <td>ADB Device:</td>
+            <td id="tv_connection"><span class="badge badge-disconn">Checking...</span></td>
+          </tr>
+          <tr>
+            <td>MAC (WoL):</td>
+            <td id="tv_mac"><span class="muted">--</span></td>
+          </tr>
+          <tr>
+            <td>Active App:</td>
+            <td id="tv_current_app"><span class="badge badge-none">None</span></td>
+          </tr>
+          <tr>
+            <td>Target Trigger:</td>
+            <td id="tv_target_status"><span class="muted">Aguevel</span></td>
+          </tr>
+        </table>
+        <div id="tv_debounce_box"></div>
+      </div>
+
+      <!-- System Performance Card -->
+      <div class="card">
+        <h2>System Performance</h2>
+        <div id="status" class="stat-grid">
+          <div class="stat-item"><div class="muted">Capture</div><div class="stat-val" id="st_cap">--</div></div>
+          <div class="stat-item"><div class="muted">Processed</div><div class="stat-val" id="st_proc">--</div></div>
+          <div class="stat-item"><div class="muted">Inference</div><div class="stat-val" id="st_inf">--</div></div>
+          <div class="stat-item"><div class="muted">Frames</div><div class="stat-val" id="st_frames">--</div></div>
+        </div>
+      </div>
+
+      <!-- Enrollment Card -->
+      <div class="card">
+        <h2>Enroll current unknown</h2>
+        <form method="post" action="/enroll">
+          <label class="muted">Name</label><br>
+          <input name="name" required maxlength="64" placeholder="Alice" style="width:calc(100% - 22px);margin:6px 0 12px"><br>
+          <label class="muted">Face</label><br>
+          <select id="face_index" name="face_index" style="width:100%;margin:6px 0 14px">
+            <option value="0">Waiting for face...</option>
+          </select><br>
+          <button type="submit" style="width:100%">Enroll visible unknown</button>
+        </form>
+      </div>
+
+      <!-- User Database Management Card -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Enrolled Users</h2>
+          <button id="btn_flush" onclick="flushUsers()" style="background:#dc2626;padding:6px 12px;font-size:0.85rem">🗑 Flush All Users</button>
+        </div>
+        <div id="db_users_list" style="margin-top:12px;font-size:0.88rem" class="muted">Loading enrolled users...</div>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
 async function refresh(){
- try{const r=await fetch('/status',{cache:'no-store'});const s=await r.json();
- document.getElementById('status').innerHTML=`<div><b>Capture:</b> ${s.capture_fps} fps</div><div><b>Processed:</b> ${s.fps.toFixed(1)} fps</div><div><b>Inference:</b> ${s.inference_ms.toFixed(0)} ms</div><div><b>Frames:</b> ${s.frames}</div>`;
- const f=document.getElementById('faces'); f.innerHTML='';
- const sel=document.getElementById('face_index'); sel.innerHTML='';
- const unknown=s.faces.filter(x=>x.identity==='Unknown');
- s.faces.forEach(x=>{const d=document.createElement('div');d.className='face '+(x.identity==='Unknown'?'unknown':'known');d.innerHTML=`<b>Face ${x.index}</b> — ${x.identity} — detector ${x.detector.toFixed(3)} — similarity ${x.similarity>=0?x.similarity.toFixed(3):'n/a'}`;f.appendChild(d);});
- if(unknown.length===0){const o=document.createElement('option');o.value='0';o.textContent='No unknown face detected';sel.appendChild(o);}
- else {unknown.forEach(x=>{const o=document.createElement('option');o.value=x.index;o.textContent=`Face ${x.index} — Unknown (detector ${x.detector.toFixed(3)})`;sel.appendChild(o);});}
- }catch(e){document.getElementById('status').textContent='Connection lost';}
+  try {
+    const r = await fetch('/status', {cache: 'no-store'});
+    const s = await r.json();
+
+    // Update Performance Stats
+    document.getElementById('st_cap').textContent = `${s.capture_fps} fps`;
+    document.getElementById('st_proc').textContent = `${s.fps.toFixed(1)} fps`;
+    document.getElementById('st_inf').textContent = `${s.inference_ms.toFixed(0)} ms`;
+    document.getElementById('st_frames').textContent = `${s.frames}`;
+
+    // Update Android TV Status
+    const tv = s.tv || {};
+    const connEl = document.getElementById('tv_connection');
+    if (tv.connected) {
+      connEl.innerHTML = `<span class="badge badge-conn">● Connected</span> <span class="muted" style="font-size:0.8rem;margin-left:6px">${tv.host || ''}</span>`;
+    } else {
+      connEl.innerHTML = `<span class="badge badge-disconn">● Disconnected</span> <span class="muted" style="font-size:0.8rem;margin-left:6px">${tv.host || 'Disabled'}</span>`;
+    }
+
+    const appEl = document.getElementById('tv_current_app');
+    const app = (tv.current_app || s.current_app || 'none').toLowerCase();
+    if (app === 'netflix') {
+      appEl.innerHTML = `<span class="badge badge-netflix">NETFLIX</span>`;
+    } else if (app === 'youtube_kids' || app === 'youtubekids') {
+      appEl.innerHTML = `<span class="badge badge-ytkids">YOUTUBE KIDS</span>`;
+    } else if (app === 'youtube') {
+      appEl.innerHTML = `<span class="badge badge-youtube">YOUTUBE</span>`;
+    } else {
+      appEl.innerHTML = `<span class="badge badge-none">${tv.current_app || 'None'}</span>`;
+    }
+
+    const targetEl = document.getElementById('tv_target_status');
+    const targetUser = tv.target_user || 'Aguevel';
+    const kidsUser = tv.kids_user || 'kids';
+    if (tv.kids_recognized || app === 'youtube_kids' || app === 'youtubekids') {
+      targetEl.innerHTML = `<span class="ok"><b>${kidsUser}</b> recognized → <b>YouTube Kids</b></span>`;
+    } else if (tv.target_recognized || app === 'netflix') {
+      targetEl.innerHTML = `<span class="ok"><b>${targetUser}</b> recognized → <b>Netflix</b></span>`;
+    } else {
+      targetEl.innerHTML = `<span class="muted">Default → <b>YouTube</b></span>`;
+    }
+
+    const macEl = document.getElementById('tv_mac');
+    if (macEl) {
+      if (tv.mac) {
+        let macText = `<code>${tv.mac}</code>`;
+        if (tv.last_wol_ago !== null && tv.last_wol_ago !== undefined) {
+          macText += ` <span class="muted" style="font-size:0.78rem">(${tv.last_wol_ago.toFixed(0)}s ago)</span>`;
+        }
+        macEl.innerHTML = macText;
+      } else {
+        macEl.innerHTML = `<span class="muted">--</span>`;
+      }
+    }
+
+    const debEl = document.getElementById('tv_debounce_box');
+    if (debEl) {
+      if (tv.pending_app && tv.debounce_remaining > 0) {
+        const pendingUpper = tv.pending_app.replace('_', ' ').toUpperCase();
+        debEl.innerHTML = `<div class="pending-box"><span>⏳</span><span>Debouncing switch to <b>${pendingUpper}</b> (${tv.debounce_remaining.toFixed(1)}s remaining)...</span></div>`;
+      } else {
+        debEl.innerHTML = `<div class="stable-box">✓ Active app state is stable</div>`;
+      }
+    }
+
+    // Update Faces list
+    const f = document.getElementById('faces');
+    f.innerHTML = '';
+    if (!s.faces || s.faces.length === 0) {
+      f.innerHTML = '<div class="muted">No faces detected</div>';
+    } else {
+      s.faces.forEach(x => {
+        const d = document.createElement('div');
+        const isUnknown = x.identity === 'Unknown';
+        d.className = 'face ' + (isUnknown ? 'unknown' : 'known');
+        const sim = x.similarity >= 0 ? x.similarity.toFixed(3) : 'n/a';
+        d.innerHTML = `<div><b>Face ${x.index}</b>: <span class="${isUnknown ? 'warn' : 'ok'}"><b>${x.identity}</b></span></div><div class="muted" style="margin-top:4px">Similarity: ${sim} | Detector: ${x.detector.toFixed(3)}</div>`;
+        f.appendChild(d);
+      });
+    }
+
+    // Update Enroll Dropdown
+    const sel = document.getElementById('face_index');
+    const unknown = (s.faces || []).filter(x => x.identity === 'Unknown');
+    const currentVal = sel.value;
+    sel.innerHTML = '';
+    if (unknown.length === 0) {
+      const o = document.createElement('option');
+      o.value = '0';
+      o.textContent = 'No unknown face detected';
+      sel.appendChild(o);
+    } else {
+      unknown.forEach(x => {
+        const o = document.createElement('option');
+        o.value = x.index;
+        o.textContent = `Face ${x.index} — Unknown (detector ${x.detector.toFixed(3)})`;
+        if (String(x.index) === currentVal) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+
+    // Update Enrolled Users list
+    const usersEl = document.getElementById('db_users_list');
+    if (usersEl && s.enrolled_users) {
+      if (s.enrolled_users.length === 0) {
+        usersEl.innerHTML = '<span class="muted">Database is empty (no enrolled users).</span>';
+      } else {
+        usersEl.innerHTML = `<span class="muted">Total (${s.enrolled_users.length}):</span> ` + 
+          s.enrolled_users.map(u => `<span class="badge" style="background:#1e293b;border:1px solid #334155;color:#93c5fd;margin:2px">${u}</span>`).join(' ');
+      }
+    }
+
+  } catch(e) {
+    document.getElementById('tv_connection').innerHTML = `<span class="badge badge-disconn">Connection Lost</span>`;
+  }
 }
-setInterval(refresh,1000);refresh();
+
+async function wakeTV() {
+  const btn = document.getElementById('btn_wake_tv');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '⚡ Waking...'; }
+    const r = await fetch('/tv/wake', {method: 'POST', headers: {'Accept': 'application/json'}});
+    const data = await r.json();
+    refresh();
+  } catch(err) {
+    alert('Error sending Wake-on-LAN: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Wake TV (WoL)'; }
+  }
+}
+
+async function flushUsers(){
+  if (!confirm('Are you sure you want to flush all enrolled users from the database? This cannot be undone.')) return;
+  const btn = document.getElementById('btn_flush');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Flushing...'; }
+    const r = await fetch('/flush', {method: 'POST', headers: {'Accept': 'application/json'}});
+    if (r.ok) {
+      refresh();
+    } else {
+      alert('Failed to flush users: ' + (await r.text()));
+    }
+  } catch(err) {
+    alert('Error flushing users: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🗑 Flush All Users'; }
+  }
+}
+
+setInterval(refresh, 1000);
+refresh();
 </script>
-</body></html>
+</body>
+</html>

@@ -58,6 +58,17 @@ The page provides:
 
 When an unknown face is visible, enter a name and a face index (normally `0`) and submit **Enroll visible unknown**. The application writes the normalized 128-D embedding to the JSON database atomically.
 
+## Android TV Control & Wake-on-LAN
+
+The application connects to an Android TV over ADB and can wake the device using Wake-on-LAN (WoL):
+
+- `--tv-host`: Android TV ADB host and port (e.g. `192.168.1.173:5555`).
+- `--tv-mac`: Target MAC address for Wake-on-LAN magic packet broadcasts (default: `70:54:b4:fe:8e:ca`).
+- `--tv-adb-port`: Local ADB server port to avoid conflicts (default: `5038`).
+- `--no-tv`: Disable Android TV control.
+
+Wake-on-LAN broadcasts UDP magic packets (ports 9 and 7) on initialization, automatically before app switches when the TV is in standby, and via the browser dashboard's **⚡ Wake TV (WoL)** button.
+
 ## Important
 
 Only one process should own `/dev/video0` at a time. Stop the standalone `gst-launch-1.0 v4l2src ...` camera sender before starting `scripts/face_id.py`.
